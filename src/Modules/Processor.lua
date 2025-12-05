@@ -42,30 +42,53 @@ local function linearRegressionVelocity(samples)
 	return Vector3.new(covx/denom, covy/denom, covz/denom)
 end
 
+local function sampleResidualStd(samples, v)
+	if #samples < 2 then return 0 end
+	local t0 = samples[1].t
+	local sum = 0
+	local sumsq = 0
+	local n = 0
+	for i=1,#samples do
+		local expected = samples[1].pos + v * (samples[i].t - t0)
+		local r = (samples[i].pos - expected).Magnitude
+		sum = sum + r
+		sumsq = sumsq + (r * r)
+		n = n + 1
+	end
+	if n == 0 then return 0 end
+	local mean = sum / n
+	local var = (sumsq / n) - (mean * mean)
+	if var < 0 then var = 0 end
+	return math.sqrt(var)
+end
+
 local DEFAULTS = {
 	historyPeriod = 0.25,
 	minSamples = 4,
-	maxSamples = 25,
+	maxSamples = 28,
 	updateRate = 1/120,
 	maxSpeed = 40,
-	teleportFactor = 2.0,
+	teleportFactor = 1.8,
 	basePrediction = 0.08,
 	predictionScale = 0.10,
-	maxPrediction = 0.6,
-	rmseWindow = 60,
-	idleSpeed = 1.5,
-	walkSpeed = 8,
-	runSpeed = 16,
+	maxPrediction = 0.45,
+	rmseWindow = 40,
+	idleSpeed = 1.2,
+	walkSpeed = 6,
+	runSpeed = 14,
 	turnRateThreshold = 1.5,
-	arcPredictScale = 0.65,
+	arcPredictScale = 0.7,
 	alphaBetaEnableRMSE = 6.0,
-	alphaBetaAlpha = 0.5,
-	alphaBetaBeta = 0.3,
 	autoTune = true,
-	autoTuneLR = 0.03,
+	autoTuneLR = 0.02,
 	airGravityScale = 0.85,
-	idleDamping = 0.92,
-	groundSnapThreshold = 0.5
+	idleDamping = 0.90,
+	groundSnapThreshold = 0.5,
+	maxBiasBlend = 0.75,
+	failResetThreshold = 6,
+	inconsistentStdThreshold = 3.5,
+	maxPredictionClamp = 1.6,
+	distancePredictionFactor = 0.25
 }
 
 local function computeTurnRate(samples)
@@ -141,9 +164,9 @@ function Processor:_ensureBuffer(id)
 		lastVel = Vector3.new(),
 		lastDt = 0,
 		predScale = self.opts.predictionScale,
-		alphaBeta = {x = nil, v = nil},
 		failCount = 0,
-		consecutiveIdle = 0
+		consecutiveIdle = 0,
+		inconsistent = false
 	}
 	self._buffers[id] = b
 	return b
@@ -156,20 +179,35 @@ function Processor:_isTeleport(prevPos, curPos, dt, maxSpeed)
 	return disp > maxDisp
 end
 
+function Processor:_pruneInconsistent(samples, maxSpeed)
+	if #samples < 3 then return samples end
+	for i=2,#samples do
+		local a = samples[i-1].pos
+		local b = samples[i].pos
+		local dt = math.max(1e-6, samples[i].t - samples[i-1].t)
+		local disp = (b - a).Magnitude
+		local maxDisp = maxSpeed * (dt + 0.05) * (self.opts.teleportFactor * 0.9)
+		if disp > maxDisp * 1.2 then
+			local new = {}
+			for j=i,#samples do table.insert(new, samples[j]) end
+			return new
+		end
+	end
+	return samples
+end
+
 function Processor:_adaptivePredictionTime(speed, predScale, state)
 	local base = self.opts.basePrediction
 	local scale = predScale or self.opts.predictionScale
 	local maxT = self.opts.maxPrediction
 	local maxSpeed = self.opts.maxSpeed
-	
 	if state == "idle" then
-		return base * 0.3
+		return base * 0.25
 	elseif state == "walk" then
-		return base * 0.6
+		return base * 0.55
 	elseif state == "air" then
-		return base * 1.4
+		return base * 1.3
 	end
-	
 	local t = base + scale * clamp(speed / maxSpeed, 0, 1)
 	if t > maxT then t = maxT end
 	return t
@@ -227,6 +265,7 @@ function Processor:_processEntry(id, pdata)
 		b.lastPredT = t
 		return
 	end
+	b.samples = self:_pruneInconsistent(b.samples, self.opts.maxSpeed)
 	local oldest = b.samples[1]
 	local newest = b.samples[#b.samples]
 	local dt = math.max(1e-6, newest.t - oldest.t)
@@ -241,13 +280,12 @@ function Processor:_processEntry(id, pdata)
 		return
 	end
 	local v = linearRegressionVelocity(b.samples)
-	v = v:Lerp(b.lastVel or v, 0.4)
+	v = v:Lerp(b.lastVel or v, 0.45)
 	local speed = vecMag(v)
-	local alpha = 0.3
+	local alpha = 0.28
 	b.speedEWMA = b.speedEWMA * (1 - alpha) + speed * alpha
 	local state = self:_classify(b.speedEWMA, p)
 	b.state = state
-	
 	if state == "idle" then
 		b.consecutiveIdle = b.consecutiveIdle + 1
 		if b.consecutiveIdle > 10 then
@@ -257,17 +295,29 @@ function Processor:_processEntry(id, pdata)
 	else
 		b.consecutiveIdle = 0
 	end
-	
 	local turnRate = computeTurnRate(b.samples)
 	b.turnRate = turnRate
 	local predScale = b.predScale or self.opts.predictionScale
 	if state == "sprint" then
-		predScale = predScale * (1 + clamp(speed / 30, 0, 1.2))
+		predScale = predScale * (1 + clamp(speed / 28, 0, 1.3))
 	end
 	local t_pred = self:_adaptivePredictionTime(b.speedEWMA, predScale, state)
-	local distFactor = 0
-	if p and p.distance then distFactor = clamp(p.distance / 80, 0, 1) end
-	t_pred = t_pred * (1 + 0.25 * distFactor)
+	if p and p.distance then
+		local distFactor = clamp(p.distance / 120, 0, 1)
+		t_pred = t_pred * (1 + self.opts.distancePredictionFactor * distFactor)
+	end
+	local resStd = sampleResidualStd(b.samples, v)
+	if resStd > self.opts.inconsistentStdThreshold then
+		b.inconsistent = true
+		if resStd > (self.opts.inconsistentStdThreshold * 2) then
+			predScale = predScale * 0.5
+			t_pred = t_pred * 0.5
+		else
+			predScale = predScale * 0.85
+		end
+	else
+		b.inconsistent = false
+	end
 	local a = p and p.accel or Vector3.new()
 	if state == "idle" or state == "walk" then
 		a = a * 0.3
@@ -281,17 +331,14 @@ function Processor:_processEntry(id, pdata)
 	else
 		predicted = newest.pos + v * t_pred + 0.5 * a * (t_pred * t_pred)
 	end
-	
 	if p and p.air then
 		local g = workspace.Gravity or 196.2
 		local gravityFactor = self.opts.airGravityScale
 		predicted = predicted + Vector3.new(0, -0.5 * g * gravityFactor * (t_pred * t_pred), 0)
 	end
-	
 	if state == "idle" and predicted.Y > newest.pos.Y + self.opts.groundSnapThreshold then
 		predicted = Vector3.new(predicted.X, newest.pos.Y, predicted.Z)
 	end
-	
 	local rmseNow = 0
 	table.insert(b.rmseBuf, (predicted - newest.pos).Magnitude)
 	if #b.rmseBuf > self.opts.rmseWindow then table.remove(b.rmseBuf, 1) end
@@ -299,55 +346,70 @@ function Processor:_processEntry(id, pdata)
 	for i=1,#b.rmseBuf do sumsq = sumsq + (b.rmseBuf[i]^2) end
 	if #b.rmseBuf > 0 then rmseNow = math.sqrt(sumsq / #b.rmseBuf) end
 	b.rmse = rmseNow
-	
 	if rmseNow > self.opts.alphaBetaEnableRMSE and state ~= "idle" then
 		local ab = self:_alphaBetaPredict(b, t_pred)
 		if ab then
-			local factor = clamp((rmseNow - self.opts.alphaBetaEnableRMSE)/ (self.opts.alphaBetaEnableRMSE), 0, 0.85)
+			local factor = clamp((rmseNow - self.opts.alphaBetaEnableRMSE)/ (self.opts.alphaBetaEnableRMSE), 0, 0.95)
 			predicted = predicted:Lerp(ab, factor)
 		end
 	end
-	
 	if b.lastPred and b.lastPredT and newest.t > b.lastPredT then
 		local dtLast = newest.t - b.lastPredT
 		if dtLast > 1e-4 then
 			local biasVel = (newest.pos - b.lastPred) / dtLast
-			local biasFactor = clamp(b.rmse / (b.rmse + 1), 0, 1) * 0.6
-			predicted = predicted + biasVel * t_pred * biasFactor
+			local biasFactor = clamp(b.rmse / (b.rmse + 1), 0, 1) * self.opts.maxBiasBlend
+			local biasAdj = biasVel * t_pred * biasFactor
+			predicted = predicted + biasAdj
 		end
 	end
-	
 	if self.opts.autoTune and state ~= "idle" and state ~= "teleport" then
-		local target = clamp(1 / (1 + rmseNow * 0.45), 0.02, 0.5)
+		local target = clamp(1 / (1 + rmseNow * 0.42), 0.02, 0.6)
 		local lr = self.opts.autoTuneLR
-		if b.rmse and b.rmse > 3 then lr = lr * 1.8 end
+		if b.rmse and b.rmse > 6 then lr = lr * 1.6 end
 		local adjustment = lr * (target - predScale)
-		predScale = clamp(predScale + adjustment, 0.02, 0.6)
+		predScale = clamp(predScale + adjustment, 0.02, 0.7)
 		b.predScale = predScale
 	end
-	
-	local maxDisp = speed * (t_pred * 1.6 + 1) + 12
+	local maxDisp = speed * (t_pred * self.opts.maxPredictionClamp + 1) + 14
 	local disp = (predicted - newest.pos).Magnitude
 	if disp > maxDisp then
 		local dir = (predicted - newest.pos).Unit
 		predicted = newest.pos + dir * maxDisp
 	end
-	
+	if rmseNow > 12 or b.inconsistent and rmseNow > 8 then
+		b.failCount = b.failCount + 1
+	else
+		b.failCount = math.max(0, b.failCount - 1)
+	end
+	if b.failCount >= self.opts.failResetThreshold then
+		b.samples = { newest }
+		b.lastPred = nil
+		b.lastPredT = nil
+		b.speedEWMA = 0
+		b.predScale = self.opts.predictionScale
+		b.failCount = 0
+		b.inconsistent = false
+		local eyesPlayers = self.eyes._players
+		if eyesPlayers and eyesPlayers[id] then
+			eyesPlayers[id].predicted = newest.pos
+			eyesPlayers[id].processorPredicted = newest.pos
+		end
+		b.lastPred = newest.pos
+		b.lastPredT = t
+		b.lastVel = Vector3.new()
+		b.lastDt = dt
+		self._stats.totalSamples = self._stats.totalSamples + 1
+		return
+	end
 	local eyesPlayers = self.eyes._players
 	if eyesPlayers and eyesPlayers[id] then
 		eyesPlayers[id].predicted = predicted
 		eyesPlayers[id].processorPredicted = predicted
 	end
-	
 	b.lastPred = predicted
 	b.lastPredT = t
 	b.lastVel = v
 	b.lastDt = dt
-	if rmseNow > 4 then
-		b.failCount = b.failCount + 1
-	else
-		b.failCount = math.max(0, b.failCount - 1)
-	end
 	self._stats.totalSamples = self._stats.totalSamples + 1
 end
 
@@ -405,7 +467,9 @@ function Processor:GetPlayerStats(playerOrId)
 		samples = #b.samples,
 		lastPred = b.lastPred,
 		predScale = b.predScale,
-		turnRate = b.turnRate or 0
+		turnRate = b.turnRate or 0,
+		failCount = b.failCount or 0,
+		inconsistent = b.inconsistent or false
 	}
 end
 
