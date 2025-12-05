@@ -47,22 +47,22 @@ local DEFAULTS = {
 	minSamples = 4,
 	maxSamples = 25,
 	updateRate = 1/120,
-	maxSpeed = 100,
+	maxSpeed = 40,
 	teleportFactor = 2.0,
 	basePrediction = 0.08,
-	predictionScale = 0.08,
-	maxPrediction = 0.45,
+	predictionScale = 0.10,
+	maxPrediction = 0.6,
 	rmseWindow = 60,
 	idleSpeed = 1.5,
 	walkSpeed = 8,
 	runSpeed = 16,
 	turnRateThreshold = 1.5,
 	arcPredictScale = 0.65,
-	alphaBetaEnableRMSE = 8.0,
+	alphaBetaEnableRMSE = 6.0,
 	alphaBetaAlpha = 0.5,
 	alphaBetaBeta = 0.3,
 	autoTune = true,
-	autoTuneLR = 0.015,
+	autoTuneLR = 0.03,
 	airGravityScale = 0.85,
 	idleDamping = 0.92,
 	groundSnapThreshold = 0.5
@@ -79,8 +79,8 @@ local function computeTurnRate(samples)
 		local v1 = (b - a)
 		local v2 = (c - b)
 		if v1.Magnitude > 0.5 and v2.Magnitude > 0.5 then
-			local n1 = v1.Unit
-			local n2 = v2.Unit
+			local n1 = Vector3.new(v1.X,0,v1.Z).Unit
+			local n2 = Vector3.new(v2.X,0,v2.Z).Unit
 			local dot = clamp(n1:Dot(n2), -1, 1)
 			local ang = math.acos(dot)
 			local dt = (samples[i+1].t - samples[i-1].t)
@@ -99,7 +99,7 @@ local function arcPredict(pos, vel, turnRate, t)
 	end
 	local speed = vecMag(vel)
 	if speed < 1e-4 then return pos end
-	local radius = speed / math.max(turnRate, 0.1)
+	local radius = speed / math.max(math.abs(turnRate), 0.1)
 	local forward = Vector3.new(vel.X, 0, vel.Z).Unit
 	local right = Vector3.new(forward.Z, 0, -forward.X)
 	local dir = (turnRate > 0) and right or -right
@@ -167,7 +167,7 @@ function Processor:_adaptivePredictionTime(speed, predScale, state)
 	elseif state == "walk" then
 		return base * 0.6
 	elseif state == "air" then
-		return base * 1.2
+		return base * 1.4
 	end
 	
 	local t = base + scale * clamp(speed / maxSpeed, 0, 1)
@@ -176,7 +176,7 @@ function Processor:_adaptivePredictionTime(speed, predScale, state)
 end
 
 function Processor:_classify(speed, p)
-	if p.air then return "air" end
+	if p and p.air then return "air" end
 	if speed < self.opts.idleSpeed then return "idle" end
 	if speed < self.opts.walkSpeed then return "walk" end
 	if speed < self.opts.runSpeed then return "run" end
@@ -213,7 +213,7 @@ function Processor:_processEntry(id, pdata)
 	end
 	if #b.samples < self.opts.minSamples then
 		local fallbackPred = (p.lastPos or pos) + (p.vel or Vector3.new()) * (self.opts.basePrediction or 0.08)
-		if p.air then
+		if p and p.air then
 			local g = workspace.Gravity or 196.2
 			local gravityFactor = self.opts.airGravityScale
 			fallbackPred = fallbackPred + Vector3.new(0, -0.5 * g * gravityFactor * ((self.opts.basePrediction or 0.08) ^ 2), 0)
@@ -241,6 +241,7 @@ function Processor:_processEntry(id, pdata)
 		return
 	end
 	local v = linearRegressionVelocity(b.samples)
+	v = v:Lerp(b.lastVel or v, 0.4)
 	local speed = vecMag(v)
 	local alpha = 0.3
 	b.speedEWMA = b.speedEWMA * (1 - alpha) + speed * alpha
@@ -260,13 +261,17 @@ function Processor:_processEntry(id, pdata)
 	local turnRate = computeTurnRate(b.samples)
 	b.turnRate = turnRate
 	local predScale = b.predScale or self.opts.predictionScale
+	if state == "sprint" then
+		predScale = predScale * (1 + clamp(speed / 30, 0, 1.2))
+	end
 	local t_pred = self:_adaptivePredictionTime(b.speedEWMA, predScale, state)
-	local a = p.accel or Vector3.new()
-	
+	local distFactor = 0
+	if p and p.distance then distFactor = clamp(p.distance / 80, 0, 1) end
+	t_pred = t_pred * (1 + 0.25 * distFactor)
+	local a = p and p.accel or Vector3.new()
 	if state == "idle" or state == "walk" then
 		a = a * 0.3
 	end
-	
 	local predicted
 	if math.abs(turnRate) > self.opts.turnRateThreshold and b.speedEWMA > 2 then
 		local arc = arcPredict(newest.pos, v, turnRate, t_pred)
@@ -277,7 +282,7 @@ function Processor:_processEntry(id, pdata)
 		predicted = newest.pos + v * t_pred + 0.5 * a * (t_pred * t_pred)
 	end
 	
-	if p.air then
+	if p and p.air then
 		local g = workspace.Gravity or 196.2
 		local gravityFactor = self.opts.airGravityScale
 		predicted = predicted + Vector3.new(0, -0.5 * g * gravityFactor * (t_pred * t_pred), 0)
@@ -298,17 +303,34 @@ function Processor:_processEntry(id, pdata)
 	if rmseNow > self.opts.alphaBetaEnableRMSE and state ~= "idle" then
 		local ab = self:_alphaBetaPredict(b, t_pred)
 		if ab then
-			local factor = clamp((rmseNow - self.opts.alphaBetaEnableRMSE)/ (self.opts.alphaBetaEnableRMSE), 0, 0.6)
+			local factor = clamp((rmseNow - self.opts.alphaBetaEnableRMSE)/ (self.opts.alphaBetaEnableRMSE), 0, 0.85)
 			predicted = predicted:Lerp(ab, factor)
 		end
 	end
 	
+	if b.lastPred and b.lastPredT and newest.t > b.lastPredT then
+		local dtLast = newest.t - b.lastPredT
+		if dtLast > 1e-4 then
+			local biasVel = (newest.pos - b.lastPred) / dtLast
+			local biasFactor = clamp(b.rmse / (b.rmse + 1), 0, 1) * 0.6
+			predicted = predicted + biasVel * t_pred * biasFactor
+		end
+	end
+	
 	if self.opts.autoTune and state ~= "idle" and state ~= "teleport" then
-		local target = clamp(1 / (1 + rmseNow * 0.5), 0.02, 0.4)
+		local target = clamp(1 / (1 + rmseNow * 0.45), 0.02, 0.5)
 		local lr = self.opts.autoTuneLR
+		if b.rmse and b.rmse > 3 then lr = lr * 1.8 end
 		local adjustment = lr * (target - predScale)
-		predScale = clamp(predScale + adjustment, 0.02, 0.35)
+		predScale = clamp(predScale + adjustment, 0.02, 0.6)
 		b.predScale = predScale
+	end
+	
+	local maxDisp = speed * (t_pred * 1.6 + 1) + 12
+	local disp = (predicted - newest.pos).Magnitude
+	if disp > maxDisp then
+		local dir = (predicted - newest.pos).Unit
+		predicted = newest.pos + dir * maxDisp
 	end
 	
 	local eyesPlayers = self.eyes._players
