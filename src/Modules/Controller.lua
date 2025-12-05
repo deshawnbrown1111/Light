@@ -47,7 +47,7 @@ function module.isStuck(controller, currentPos, dt)
     
     local moved = Vector.distance(currentPos, controller.lastPos)
     
-    if moved < 0.5 then
+    if moved < 0.1 then
         controller.stuckTime = controller.stuckTime + dt
     else
         controller.stuckTime = 0
