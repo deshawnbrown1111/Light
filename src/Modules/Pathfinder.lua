@@ -11,7 +11,7 @@ local module = {}
 
 function module.new(opts)
     opts = opts or {}
-    return {
+    local self = {
         map = opts.map or WorldMap.new(),
         cellSize = opts.cellSize or 3,
         maxIterations = opts.maxIterations or 10000,
@@ -19,6 +19,7 @@ function module.new(opts)
         jumpCost = opts.jumpCost or 1.5,
         diagonalCost = opts.diagonalCost or 1.414
     }
+    return self
 end
 
 function module.reconstructPath(node)
