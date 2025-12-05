@@ -1,4 +1,4 @@
-local Eyes = loadstring(game:HttpGet("https://raw.githubusercontent.com/deshawnbrown1111/Light/refs/heads/main/src/Modules/Prediction.lua"))()
+local Eyes = import("Modules/Prediction")
 
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
