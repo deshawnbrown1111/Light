@@ -44,3 +44,5 @@ local function Download(url)
     if ok3 then return asset end
     return url
 end
+
+return Download
