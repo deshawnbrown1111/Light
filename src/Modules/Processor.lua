@@ -1,3 +1,5 @@
+local Eyes = loadstring(game:HttpGet("https://raw.githubusercontent.com/deshawnbrown1111/Light/refs/heads/main/src/Modules/Prediction.lua"))()
+
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 
@@ -54,24 +56,16 @@ local DEFAULTS = {
 	idleSpeed = 0.7,
 	walkSpeed = 6,
 	runSpeed = 14,
-	turnRateThreshold = 1.2, -- radians/sec to consider turning
-	arcPredictScale = 0.5, -- how much to use curvature for arc prediction
-	alphaBetaEnableRMSE = 6.0, -- rmse above this triggers alpha-beta fallback
+	turnRateThreshold = 1.2,
+	arcPredictScale = 0.5,
+	alphaBetaEnableRMSE = 6.0,
 	alphaBetaAlpha = 0.6,
 	alphaBetaBeta = 0.4,
-	autoTune = true, -- adapt predictionScale per player
-	autoTuneLR = 0.01 -- learning rate for per-player tuning
+	autoTune = true,
+	autoTuneLR = 0.01
 }
 
-local function avg(list)
-	if #list == 0 then return 0 end
-	local s = 0
-	for _,v in ipairs(list) do s = s + v end
-	return s / #list
-end
-
 local function computeTurnRate(samples)
-	-- approximate angular velocity of heading over window
 	if #samples < 3 then return 0 end
 	local total = 0
 	local count = 0
@@ -97,19 +91,16 @@ local function computeTurnRate(samples)
 end
 
 local function arcPredict(pos, vel, turnRate, t)
-	-- simple circular arc approximation: radius = speed / turnRate
 	if math.abs(turnRate) < 1e-6 then
 		return pos + vel * t
 	end
 	local speed = vecMag(vel)
 	if speed < 1e-4 then return pos end
 	local radius = speed / turnRate
-	-- compute center of rotation: perpendicular in XZ plane
 	local forward = Vector3.new(vel.X, 0, vel.Z).Unit
-	local right = Vector3.new(forward.Z, 0, -forward.X) -- right-hand
+	local right = Vector3.new(forward.Z, 0, -forward.X)
 	local dir = (turnRate > 0) and right or -right
 	local center = pos + dir * radius
-	-- rotate around center by theta = turnRate * t
 	local theta = turnRate * t
 	local offset = pos - center
 	local cosT = math.cos(theta)
@@ -128,7 +119,7 @@ function Processor.new(eyes, opts)
 	for k,v in pairs(DEFAULTS) do self.opts[k] = (opts and opts[k] ~= nil) and opts[k] or v end
 	self._running = false
 	self._conns = {}
-	self._buffers = {} -- id -> buffer
+	self._buffers = {}
 	self._lastTick = 0
 	self._stats = {totalSamples = 0, processed = 0}
 	return self
@@ -146,8 +137,8 @@ function Processor:_ensureBuffer(id)
 		state = "unknown",
 		lastVel = Vector3.new(),
 		lastDt = 0,
-		predScale = self.opts.predictionScale, -- per-player tuning
-		alphaBeta = {x = nil, v = nil}, -- state for fallback filter
+		predScale = self.opts.predictionScale,
+		alphaBeta = {x = nil, v = nil},
 		failCount = 0
 	}
 	self._buffers[id] = b
@@ -180,19 +171,14 @@ function Processor:_classify(speed, p)
 end
 
 function Processor:_alphaBetaPredict(b, t_pred)
-	-- basic alpha-beta filter: state x (pos) and v (vel)
 	local st = b.alphaBeta
 	if not st.x then
-		-- initialize from last sample
 		if #b.samples == 0 then return nil end
 		st.x = b.samples[#b.samples].pos
 		st.v = b.lastVel or Vector3.new()
 	end
 	local x = st.x
 	local v = st.v
-	local a = self.opts.alphaBetaAlpha
-	local bb = self.opts.alphaBetaBeta
-	-- predict forward
 	local pred = x + v * t_pred
 	return pred
 end
@@ -237,7 +223,6 @@ function Processor:_processEntry(id, pdata)
 	local t_pred = self:_adaptivePredictionTime(b.speedEWMA, predScale)
 	local a = p.accel or Vector3.new()
 	local predicted
-	-- if turning and high turn rate, use arc prediction blended with straight
 	if math.abs(turnRate) > self.opts.turnRateThreshold and b.speedEWMA > 1 then
 		local arc = arcPredict(newest.pos, v, turnRate, t_pred)
 		local straight = newest.pos + v * t_pred + 0.5 * a * (t_pred * t_pred)
@@ -250,7 +235,6 @@ function Processor:_processEntry(id, pdata)
 		local g = workspace.Gravity or 196.2
 		predicted = predicted + Vector3.new(0, -0.5 * g * (t_pred * t_pred), 0)
 	end
-	-- optionally use alpha-beta fallback if rmse high
 	local rmseNow = 0
 	table.insert(b.rmseBuf, (predicted - newest.pos).Magnitude)
 	if #b.rmseBuf > self.opts.rmseWindow then table.remove(b.rmseBuf, 1) end
@@ -261,26 +245,21 @@ function Processor:_processEntry(id, pdata)
 	if rmseNow > self.opts.alphaBetaEnableRMSE then
 		local ab = self:_alphaBetaPredict(b, t_pred)
 		if ab then
-			-- blend fallback with predicted based on how large rmse is
 			local factor = clamp((rmseNow - self.opts.alphaBetaEnableRMSE)/ (self.opts.alphaBetaEnableRMSE*2), 0, 1)
 			predicted = predicted:Lerp(ab, factor)
 		end
 	end
-	-- auto-tune predScale per player if enabled
 	if self.opts.autoTune then
 		local target = clamp(1 / (1 + rmseNow), 0.02, 0.5)
-		-- small gradient step to reduce rmse over time
 		local lr = self.opts.autoTuneLR
 		local adjustment = lr * (target - predScale)
 		predScale = clamp(predScale + adjustment, 0.02, 0.5)
 		b.predScale = predScale
 	end
-	-- write back to Eyes
 	local eyesPlayers = self.eyes._players
 	if eyesPlayers and eyesPlayers[id] then
 		eyesPlayers[id].predicted = predicted
 	end
-	-- record telemetry
 	b.lastPred = predicted
 	b.lastPredT = t
 	b.lastVel = v
@@ -364,4 +343,4 @@ function Processor:ForceRecompute()
 	self:_processAll()
 end
 
-return Processor
+return {Eyes = Eyes, Processor = Processor}
