@@ -211,7 +211,22 @@ function Processor:_processEntry(id, pdata)
 		local removeCount = #b.samples - self.opts.maxSamples
 		for i=1,removeCount do table.remove(b.samples,1) end
 	end
-	if #b.samples < self.opts.minSamples then return end
+	if #b.samples < self.opts.minSamples then
+		local fallbackPred = (p.lastPos or pos) + (p.vel or Vector3.new()) * (self.opts.basePrediction or 0.08)
+		if p.air then
+			local g = workspace.Gravity or 196.2
+			local gravityFactor = self.opts.airGravityScale
+			fallbackPred = fallbackPred + Vector3.new(0, -0.5 * g * gravityFactor * ((self.opts.basePrediction or 0.08) ^ 2), 0)
+		end
+		local eyesPlayers = self.eyes._players
+		if eyesPlayers and eyesPlayers[id] then
+			eyesPlayers[id].predicted = fallbackPred
+			eyesPlayers[id].processorPredicted = fallbackPred
+		end
+		b.lastPred = fallbackPred
+		b.lastPredT = t
+		return
+	end
 	local oldest = b.samples[1]
 	local newest = b.samples[#b.samples]
 	local dt = math.max(1e-6, newest.t - oldest.t)
@@ -299,6 +314,7 @@ function Processor:_processEntry(id, pdata)
 	local eyesPlayers = self.eyes._players
 	if eyesPlayers and eyesPlayers[id] then
 		eyesPlayers[id].predicted = predicted
+		eyesPlayers[id].processorPredicted = predicted
 	end
 	
 	b.lastPred = predicted
@@ -324,9 +340,11 @@ function Processor:start()
 	if self._running then return end
 	self._running = true
 	self._lastTick = 0
-	self._conns.heartbeat = RunService.Heartbeat:Connect(function(dt)
+	local runner = RunService.RenderStepped or RunService.Heartbeat
+	self._conns.heartbeat = runner:Connect(function(dt)
 		self._lastTick = self._lastTick + dt
-		if self._lastTick >= (self.opts.updateRate or 1/120) then
+		local rate = math.max(1/240, (self.opts.updateRate or 1/120))
+		if self._lastTick >= rate then
 			self._lastTick = 0
 			self:_processAll()
 		end
