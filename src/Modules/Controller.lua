@@ -5,6 +5,7 @@ local Movement = import("Math/Movement")
 local Vector = import("Math/Vector")
 local Grid = import("Math/Grid")
 local Object = import("Modules/Object")
+local Visualizer = import("Modules/Visualizer")
 
 local module = {}
 
@@ -22,7 +23,8 @@ function module.new(opts)
         lastPos = nil,
         onComplete = nil,
         onStuck = nil,
-        conn = nil
+        conn = nil,
+        visualizer = opts.visualizer or nil
     }
 end
 
@@ -30,6 +32,10 @@ function module.setPath(controller, path)
     controller.path = path
     controller.currentIndex = 1
     controller.stuckTime = 0
+    
+    if controller.visualizer then
+        Visualizer.drawPath(controller.visualizer, path, 1)
+    end
 end
 
 function module.getNextWaypoint(controller)
@@ -115,6 +121,10 @@ function module.update(controller, dt)
     
     if reached then
         controller.currentIndex = controller.currentIndex + 1
+        
+        if controller.visualizer then
+            Visualizer.updateCurrentIndex(controller.visualizer, controller.path, controller.currentIndex)
+        end
     end
 end
 
@@ -139,6 +149,10 @@ function module.stop(controller)
     if controller.conn then
         controller.conn:Disconnect()
         controller.conn = nil
+    end
+    
+    if controller.visualizer then
+        Visualizer.clear(controller.visualizer)
     end
     
     local char = controller.player.Character
