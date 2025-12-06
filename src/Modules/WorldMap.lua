@@ -15,7 +15,11 @@ function module.new(opts)
         scanRadius = opts.scanRadius or 100,
         maxFallCheck = opts.maxFallCheck or 20,
         debugEnabled = opts.debugEnabled or false,
-        debugParts = {}
+        debugParts = {},
+        lazyLoad = opts.lazyLoad ~= false,
+        scanBudget = opts.scanBudget or 10,
+        scanQueue = {},
+        scanning = false
     }
 end
 
@@ -142,13 +146,52 @@ function module.scanCell(map, worldPos)
     return hasGround, height, material
 end
 
+function module.scanCellLazy(map, worldPos)
+    local Grid = import("Math/Grid")
+    local cell = Grid.toCell(worldPos, map.cellSize)
+    local key = Node.key(cell)
+    
+    if map.scanned[key] then
+        return map.ground[key] or false, map.heights[key], map.materials[key]
+    end
+    
+    if not map.scanQueue[key] then
+        map.scanQueue[key] = worldPos
+    end
+    
+    return nil, nil, nil
+end
+
+function module.processScanQueue(map, budget)
+    if map.scanning then return 0 end
+    
+    map.scanning = true
+    budget = budget or map.scanBudget
+    local processed = 0
+    
+    for key, worldPos in pairs(map.scanQueue) do
+        if processed >= budget then break end
+        
+        module.scanCell(map, worldPos)
+        map.scanQueue[key] = nil
+        processed = processed + 1
+    end
+    
+    map.scanning = false
+    return processed
+end
+
 function module.checkPathSafe(map, startPos, endPos, maxFallDist)
     maxFallDist = maxFallDist or 10
-    local steps = math.ceil((endPos - startPos).Magnitude / 2)
+    local steps = math.min(math.ceil((endPos - startPos).Magnitude / 2), 5)
     
     for i = 0, steps do
         local t = i / steps
         local checkPos = startPos:Lerp(endPos, t)
+        
+        if map.lazyLoad then
+            module.scanCellLazy(map, checkPos)
+        end
         
         local result = module.raycastGround(map, checkPos, maxFallDist + 5)
         
@@ -191,59 +234,6 @@ function module.isBlockSolid(map, worldPos)
     return false, nil
 end
 
-function module.scanArea(map, center, radius)
-    local results = {}
-    local heightCheck = map.maxFallCheck
-    
-    for x = -radius, radius, map.cellSize do
-        for z = -radius, radius, map.cellSize do
-            local checkPos = center + Vector3.new(x, 0, z)
-            local hasGround, height, material = module.scanCell(map, checkPos)
-            
-            local Grid = import("Math/Grid")
-            local cell = Grid.toCell(checkPos, map.cellSize)
-            
-            table.insert(results, {
-                position = checkPos,
-                cell = cell,
-                hasGround = hasGround,
-                height = height,
-                material = material,
-                dangerous = module.isDangerous(map, cell)
-            })
-        end
-    end
-    
-    return results
-end
-
-function module.scanLine(map, startPos, endPos, resolution)
-    resolution = resolution or 3
-    local results = {}
-    local distance = (endPos - startPos).Magnitude
-    local steps = math.ceil(distance / resolution)
-    
-    for i = 0, steps do
-        local t = i / steps
-        local checkPos = startPos:Lerp(endPos, t)
-        local hasGround, height, material = module.scanCell(map, checkPos)
-        
-        local Grid = import("Math/Grid")
-        local cell = Grid.toCell(checkPos, map.cellSize)
-        
-        table.insert(results, {
-            position = checkPos,
-            cell = cell,
-            hasGround = hasGround,
-            height = height,
-            material = material,
-            dangerous = module.isDangerous(map, cell)
-        })
-    end
-    
-    return results
-end
-
 function module.debugVisualize(map, cell, color, duration)
     if not map.debugEnabled then return end
     
@@ -282,26 +272,6 @@ function module.clearDebug(map)
     map.debugParts = {}
 end
 
-function module.preloadArea(map, center, radius)
-    local scanned = 0
-    local startTime = tick()
-    
-    for x = -radius, radius, map.cellSize do
-        for z = -radius, radius, map.cellSize do
-            local checkPos = center + Vector3.new(x, 0, z)
-            module.scanCell(map, checkPos)
-            scanned = scanned + 1
-            
-            if scanned % 50 == 0 then
-                task.wait()
-            end
-        end
-    end
-    
-    local elapsed = tick() - startTime
-    return scanned, elapsed
-end
-
 function module.clear(map)
     map.blocked = {}
     map.ground = {}
@@ -309,6 +279,7 @@ function module.clear(map)
     map.scanned = {}
     map.dangers = {}
     map.materials = {}
+    map.scanQueue = {}
     module.clearDebug(map)
 end
 
@@ -316,15 +287,18 @@ function module.getStats(map)
     local scannedCount = 0
     local groundCount = 0
     local dangerCount = 0
+    local queuedCount = 0
     
     for _ in pairs(map.scanned) do scannedCount = scannedCount + 1 end
     for _ in pairs(map.ground) do groundCount = groundCount + 1 end
     for _ in pairs(map.dangers) do dangerCount = dangerCount + 1 end
+    for _ in pairs(map.scanQueue) do queuedCount = queuedCount + 1 end
     
     return {
         scanned = scannedCount,
         ground = groundCount,
-        dangers = dangerCount
+        dangers = dangerCount,
+        queued = queuedCount
     }
 end
 
