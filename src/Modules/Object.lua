@@ -1,3 +1,5 @@
+-- // NOT USED AS OF RN
+
 local Players = game:GetService("Players")
 local plr = Players.LocalPlayer
 
