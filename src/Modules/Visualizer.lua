@@ -56,6 +56,7 @@ function module.createSegmentedLine(viz, startPos, endPos, color, segments)
         part.Color = color
         part.Material = Enum.Material.Neon
         part.Transparency = 0.3
+        part.CastShadow = false
         
         if not viz.folder then
             viz.folder = Instance.new("Folder")
@@ -107,12 +108,13 @@ function module.drawPath(viz, path, currentIndex)
         local goalMarker = Instance.new("Part")
         goalMarker.Anchored = true
         goalMarker.CanCollide = false
-        goalMarker.Size = Vector3.new(1, 3, 1)
+        goalMarker.Size = Vector3.new(2, 2, 2)
         goalMarker.Position = path[#path]
         goalMarker.Color = viz.goalColor
         goalMarker.Material = Enum.Material.Neon
-        goalMarker.Transparency = 0.5
-        goalMarker.Shape = Enum.PartType.Cylinder
+        goalMarker.Transparency = 0.3
+        goalMarker.Shape = Enum.PartType.Block
+        goalMarker.CastShadow = false
         goalMarker.Parent = viz.folder
         table.insert(viz.parts, goalMarker)
     end
