@@ -12,14 +12,16 @@ function module.new(opts)
         dangers = {},
         materials = {},
         cellSize = opts.cellSize or 3,
-        scanRadius = opts.scanRadius or 100,
+        scanRadius = opts.scanRadius or 15,
         maxFallCheck = opts.maxFallCheck or 20,
         debugEnabled = opts.debugEnabled or false,
         debugParts = {},
         lazyLoad = opts.lazyLoad ~= false,
-        scanBudget = opts.scanBudget or 10,
+        scanBudget = opts.scanBudget or 5,
         scanQueue = {},
-        scanning = false
+        scanning = false,
+        activePath = nil,
+        pathScanRadius = opts.pathScanRadius or 10
     }
 end
 
@@ -77,6 +79,31 @@ function module.setDangerous(map, cell, isDanger)
     map.dangers[key] = isDanger
 end
 
+function module.isNearActivePath(map, worldPos)
+    if not map.activePath or #map.activePath == 0 then
+        return true
+    end
+    
+    local minDist = math.huge
+    for i = 1, #map.activePath do
+        local pathPoint = map.activePath[i]
+        local dist = (worldPos - pathPoint).Magnitude
+        if dist < minDist then
+            minDist = dist
+        end
+    end
+    
+    return minDist <= map.pathScanRadius
+end
+
+function module.setActivePath(map, worldPath)
+    map.activePath = worldPath
+end
+
+function module.clearActivePath(map)
+    map.activePath = nil
+end
+
 function module.raycastGround(map, worldPos, maxDist)
     local workspace = game:GetService("Workspace")
     local Players = game:GetService("Players")
@@ -107,6 +134,10 @@ function module.scanCell(map, worldPos)
     
     if map.scanned[key] then
         return map.ground[key] or false, map.heights[key], map.materials[key]
+    end
+    
+    if not module.isNearActivePath(map, worldPos) then
+        return nil, nil, nil
     end
     
     local result = module.raycastGround(map, worldPos, map.maxFallCheck)
@@ -155,6 +186,10 @@ function module.scanCellLazy(map, worldPos)
         return map.ground[key] or false, map.heights[key], map.materials[key]
     end
     
+    if not module.isNearActivePath(map, worldPos) then
+        return nil, nil, nil
+    end
+    
     if not map.scanQueue[key] then
         map.scanQueue[key] = worldPos
     end
@@ -172,13 +207,45 @@ function module.processScanQueue(map, budget)
     for key, worldPos in pairs(map.scanQueue) do
         if processed >= budget then break end
         
-        module.scanCell(map, worldPos)
+        if module.isNearActivePath(map, worldPos) then
+            module.scanCell(map, worldPos)
+        end
+        
         map.scanQueue[key] = nil
         processed = processed + 1
     end
     
     map.scanning = false
     return processed
+end
+
+function module.pruneDistantScans(map, centerPos, maxRadius)
+    maxRadius = maxRadius or 100
+    local pruned = 0
+    
+    for key, _ in pairs(map.scanned) do
+        local parts = {}
+        for num in string.gmatch(key, "[^,]+") do
+            table.insert(parts, tonumber(num))
+        end
+        
+        if #parts == 3 then
+            local cellPos = Vector3.new(parts[1], parts[2], parts[3]) * map.cellSize
+            local dist = (cellPos - centerPos).Magnitude
+            
+            if dist > maxRadius then
+                map.scanned[key] = nil
+                map.ground[key] = nil
+                map.heights[key] = nil
+                map.materials[key] = nil
+                map.dangers[key] = nil
+                map.blocked[key] = nil
+                pruned = pruned + 1
+            end
+        end
+    end
+    
+    return pruned
 end
 
 function module.checkPathSafe(map, startPos, endPos, maxFallDist)
@@ -280,6 +347,7 @@ function module.clear(map)
     map.dangers = {}
     map.materials = {}
     map.scanQueue = {}
+    map.activePath = nil
     module.clearDebug(map)
 end
 
