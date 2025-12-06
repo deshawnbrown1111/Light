@@ -5,6 +5,7 @@ local Movement = import("Math/Movement")
 local Neighbors = import("Math/Neighbors")
 local PriorityQueue = import("Math/PriorityQueue")
 local Node = import("Modules/Node")
+local Object = import("Modules/Object")
 local WorldMap = import("Modules/WorldMap")
 
 local module = {}
@@ -17,7 +18,8 @@ function module.new(opts)
         maxIterations = opts.maxIterations or 10000,
         allowDiagonal = opts.allowDiagonal ~= false,
         jumpCost = opts.jumpCost or 1.5,
-        diagonalCost = opts.diagonalCost or 1.414
+        diagonalCost = opts.diagonalCost or 1.414,
+        maxFallDistance = opts.maxFallDistance or 10
     }
     return self
 end
@@ -74,25 +76,32 @@ function module.findPath(pathfinder, startPos, goalPos)
             local neighborKey = Node.key(neighborCell)
             
             if not closedSet[neighborKey] and not WorldMap.isBlocked(pathfinder.map, neighborCell) then
-                local offset = neighborCell - current.cell
-                local isDiagonal = math.abs(offset.X) + math.abs(offset.Y) + math.abs(offset.Z) > 1
-                local isJump = offset.Y > 0
+                local currentWorld = current.cell * pathfinder.cellSize
+                local neighborWorld = neighborCell * pathfinder.cellSize
                 
-                local moveCost = 1
-                if isDiagonal then
-                    moveCost = pathfinder.diagonalCost
-                end
-                if isJump then
-                    moveCost = moveCost * pathfinder.jumpCost
-                end
+                local isSafe = Object.IsPathSafe(currentWorld, neighborWorld, pathfinder.maxFallDistance or 10)
                 
-                local tentativeG = current.g + moveCost
-                local neighborH = PathCost.heuristic(neighborCell, goalCell)
-                
-                if not gScores[neighborKey] or tentativeG < gScores[neighborKey] then
-                    gScores[neighborKey] = tentativeG
-                    local neighborNode = Node.new(neighborCell, tentativeG, neighborH, current)
-                    PriorityQueue.push(openSet, neighborNode, neighborNode.f)
+                if isSafe then
+                    local offset = neighborCell - current.cell
+                    local isDiagonal = math.abs(offset.X) + math.abs(offset.Y) + math.abs(offset.Z) > 1
+                    local isJump = offset.Y > 0
+                    
+                    local moveCost = 1
+                    if isDiagonal then
+                        moveCost = pathfinder.diagonalCost
+                    end
+                    if isJump then
+                        moveCost = moveCost * pathfinder.jumpCost
+                    end
+                    
+                    local tentativeG = current.g + moveCost
+                    local neighborH = PathCost.heuristic(neighborCell, goalCell)
+                    
+                    if not gScores[neighborKey] or tentativeG < gScores[neighborKey] then
+                        gScores[neighborKey] = tentativeG
+                        local neighborNode = Node.new(neighborCell, tentativeG, neighborH, current)
+                        PriorityQueue.push(openSet, neighborNode, neighborNode.f)
+                    end
                 end
             end
         end
