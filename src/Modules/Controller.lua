@@ -4,7 +4,6 @@ local RunService = game:GetService("RunService")
 local Movement = import("Math/Movement")
 local Vector = import("Math/Vector")
 local Grid = import("Math/Grid")
-local Object = import("Modules/Object")
 local Visualizer = import("Modules/Visualizer")
 
 local module = {}
