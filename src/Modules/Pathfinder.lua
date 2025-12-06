@@ -14,15 +14,17 @@ function module.new(opts)
     local self = {
         map = opts.map or WorldMap.new(),
         cellSize = opts.cellSize or 3,
-        maxIterations = opts.maxIterations or 10000,
+        maxIterations = opts.maxIterations or 5000,
         allowDiagonal = opts.allowDiagonal ~= false,
         jumpCost = opts.jumpCost or 1.5,
         diagonalCost = opts.diagonalCost or 1.414,
         maxFallDistance = opts.maxFallDistance or 10,
         dangerPenalty = opts.dangerPenalty or 100,
         pathCache = {},
-        maxCacheSize = opts.maxCacheSize or 100,
-        cacheTimeout = opts.cacheTimeout or 30
+        maxCacheSize = opts.maxCacheSize or 50,
+        cacheTimeout = opts.cacheTimeout or 20,
+        yieldEvery = opts.yieldEvery or 100,
+        lazyScanning = opts.lazyScanning ~= false
     }
     return self
 end
@@ -102,9 +104,23 @@ function module.findPath(pathfinder, startPos, goalPos)
     local iterations = 0
     local bestNode = startNode
     local bestDist = startH
+    local lastYield = tick()
     
     while not PriorityQueue.isEmpty(openSet) do
         iterations = iterations + 1
+        
+        if iterations % pathfinder.yieldEvery == 0 then
+            local now = tick()
+            if now - lastYield > 0.016 then
+                task.wait()
+                lastYield = tick()
+            end
+            
+            if pathfinder.lazyScanning then
+                WorldMap.processScanQueue(pathfinder.map, 5)
+            end
+        end
+        
         if iterations > pathfinder.maxIterations then
             break
         end
@@ -185,122 +201,6 @@ function module.findPath(pathfinder, startPos, goalPos)
     return nil
 end
 
-function module.findPathAsync(pathfinder, startPos, goalPos, yieldEvery)
-    yieldEvery = yieldEvery or 500
-    
-    local startCell = Grid.toCell(startPos, pathfinder.cellSize)
-    local goalCell = Grid.toCell(goalPos, pathfinder.cellSize)
-    
-    if Vector.distance(startCell, goalCell) < 0.1 then
-        return {startCell}
-    end
-    
-    local cached = module.getCachedPath(pathfinder, startCell, goalCell)
-    if cached then
-        return cached
-    end
-    
-    local openSet = PriorityQueue.new()
-    local closedSet = {}
-    local gScores = {}
-    
-    local startH = PathCost.heuristic(startCell, goalCell)
-    local startNode = Node.new(startCell, 0, startH, nil)
-    
-    PriorityQueue.push(openSet, startNode, startNode.f)
-    gScores[Node.key(startCell)] = 0
-    
-    local iterations = 0
-    local bestNode = startNode
-    local bestDist = startH
-    
-    while not PriorityQueue.isEmpty(openSet) do
-        iterations = iterations + 1
-        
-        if iterations % yieldEvery == 0 then
-            task.wait()
-        end
-        
-        if iterations > pathfinder.maxIterations then
-            break
-        end
-        
-        local current = PriorityQueue.pop(openSet)
-        local currentKey = Node.key(current.cell)
-        
-        local distToGoal = PathCost.heuristic(current.cell, goalCell)
-        if distToGoal < bestDist then
-            bestDist = distToGoal
-            bestNode = current
-        end
-        
-        if Vector.distance(current.cell, goalCell) < 1.5 then
-            local finalPath = module.reconstructPath(current)
-            module.cachePath(pathfinder, startCell, goalCell, finalPath)
-            return finalPath
-        end
-        
-        closedSet[currentKey] = true
-        
-        local neighbors = pathfinder.allowDiagonal and 
-            Neighbors.get(current.cell) or 
-            Neighbors.getCardinal(current.cell)
-        
-        for i = 1, #neighbors do
-            local neighborCell = neighbors[i]
-            local neighborKey = Node.key(neighborCell)
-            
-            if not closedSet[neighborKey] and not WorldMap.isBlocked(pathfinder.map, neighborCell) then
-                local currentWorld = current.cell * pathfinder.cellSize
-                local neighborWorld = neighborCell * pathfinder.cellSize
-                
-                local isSafe = WorldMap.checkPathSafe(
-                    pathfinder.map, 
-                    currentWorld, 
-                    neighborWorld, 
-                    pathfinder.maxFallDistance
-                )
-                
-                if isSafe then
-                    local offset = neighborCell - current.cell
-                    local isDiagonal = math.abs(offset.X) + math.abs(offset.Y) + math.abs(offset.Z) > 1
-                    local isJump = offset.Y > 0
-                    
-                    local moveCost = 1
-                    
-                    if isDiagonal then
-                        moveCost = pathfinder.diagonalCost
-                    end
-                    
-                    if isJump then
-                        moveCost = moveCost * pathfinder.jumpCost
-                    end
-                    
-                    if WorldMap.isDangerous(pathfinder.map, neighborCell) then
-                        moveCost = moveCost + pathfinder.dangerPenalty
-                    end
-                    
-                    local tentativeG = current.g + moveCost
-                    local neighborH = PathCost.heuristic(neighborCell, goalCell)
-                    
-                    if not gScores[neighborKey] or tentativeG < gScores[neighborKey] then
-                        gScores[neighborKey] = tentativeG
-                        local neighborNode = Node.new(neighborCell, tentativeG, neighborH, current)
-                        PriorityQueue.push(openSet, neighborNode, neighborNode.f)
-                    end
-                end
-            end
-        end
-    end
-    
-    if bestNode and bestNode ~= startNode then
-        local partialPath = module.reconstructPath(bestNode)
-        return partialPath
-    end
-    
-    return nil
-end
-
 function module.smoothPath(pathfinder, path)
     if not path or #path < 3 then return path end
     
@@ -312,7 +212,7 @@ function module.smoothPath(pathfinder, path)
         
         for i = #path, current + 1, -1 do
             local canReach = true
-            local steps = math.floor(Vector.distance(path[current], path[i]) * 2)
+            local steps = math.min(math.floor(Vector.distance(path[current], path[i]) * 2), 10)
             
             for s = 1, steps do
                 local t = s / steps
@@ -367,31 +267,25 @@ function module.findAndSmooth(pathfinder, startPos, goalPos)
     return worldPath
 end
 
-function module.preloadPathArea(pathfinder, startPos, goalPos)
-    local Grid = import("Math/Grid")
-    local startCell = Grid.toCell(startPos, pathfinder.cellSize)
-    local goalCell = Grid.toCell(goalPos, pathfinder.cellSize)
+function module.startBackgroundScanning(pathfinder)
+    local RunService = game:GetService("RunService")
     
-    local minX = math.min(startCell.X, goalCell.X)
-    local maxX = math.max(startCell.X, goalCell.X)
-    local minZ = math.min(startCell.Z, goalCell.Z)
-    local maxZ = math.max(startCell.Z, goalCell.Z)
-    
-    local scanned = 0
-    for x = minX, maxX do
-        for z = minZ, maxZ do
-            local cell = Vector3.new(x, startCell.Y, z)
-            local worldPos = cell * pathfinder.cellSize
-            WorldMap.scanCell(pathfinder.map, worldPos)
-            scanned = scanned + 1
-            
-            if scanned % 50 == 0 then
-                task.wait()
-            end
-        end
+    if pathfinder.scanConnection then
+        pathfinder.scanConnection:Disconnect()
     end
     
-    return scanned
+    pathfinder.scanConnection = RunService.Heartbeat:Connect(function()
+        if pathfinder.lazyScanning then
+            WorldMap.processScanQueue(pathfinder.map, pathfinder.map.scanBudget or 10)
+        end
+    end)
+end
+
+function module.stopBackgroundScanning(pathfinder)
+    if pathfinder.scanConnection then
+        pathfinder.scanConnection:Disconnect()
+        pathfinder.scanConnection = nil
+    end
 end
 
 return module
