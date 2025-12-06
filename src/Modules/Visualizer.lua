@@ -8,34 +8,67 @@ function module.new(opts)
         pathColor = opts.pathColor or Color3.fromRGB(0, 255, 255),
         nextColor = opts.nextColor or Color3.fromRGB(0, 255, 0),
         goalColor = opts.goalColor or Color3.fromRGB(255, 0, 0),
+        explorationColor = opts.explorationColor or Color3.fromRGB(255, 255, 0),
         parts = {},
         folder = nil
     }
 end
 
-function module.createLine(viz, startPos, endPos, color)
-    local distance = (endPos - startPos).Magnitude
-    local midpoint = (startPos + endPos) / 2
+function module.createSegmentedLine(viz, startPos, endPos, color, segments)
+    segments = segments or 5
+    local parts = {}
     
-    local part = Instance.new("Part")
-    part.Anchored = true
-    part.CanCollide = false
-    part.Size = Vector3.new(viz.lineThickness, viz.lineThickness, distance)
-    part.CFrame = CFrame.new(midpoint, endPos)
-    part.Color = color
-    part.Material = Enum.Material.Neon
-    part.Transparency = 0.3
-    
-    if not viz.folder then
-        viz.folder = Instance.new("Folder")
-        viz.folder.Name = "PathVisualizer"
-        viz.folder.Parent = workspace
+    for i = 0, segments - 1 do
+        local t1 = i / segments
+        local t2 = (i + 1) / segments
+        
+        local p1 = startPos:Lerp(endPos, t1)
+        local p2 = startPos:Lerp(endPos, t2)
+        
+        local rayOrigin = p1 + Vector3.new(0, 10, 0)
+        local rayDir = Vector3.new(0, -20, 0)
+        
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Blacklist
+        params.FilterDescendantsInstances = {game:GetService("Players").LocalPlayer.Character}
+        
+        local result = workspace:Raycast(rayOrigin, rayDir, params)
+        
+        if result then
+            p1 = Vector3.new(p1.X, result.Position.Y + 0.5, p1.Z)
+        end
+        
+        rayOrigin = p2 + Vector3.new(0, 10, 0)
+        result = workspace:Raycast(rayOrigin, rayDir, params)
+        
+        if result then
+            p2 = Vector3.new(p2.X, result.Position.Y + 0.5, p2.Z)
+        end
+        
+        local distance = (p2 - p1).Magnitude
+        local midpoint = (p1 + p2) / 2
+        
+        local part = Instance.new("Part")
+        part.Anchored = true
+        part.CanCollide = false
+        part.Size = Vector3.new(viz.lineThickness, viz.lineThickness, distance)
+        part.CFrame = CFrame.new(midpoint, p2)
+        part.Color = color
+        part.Material = Enum.Material.Neon
+        part.Transparency = 0.3
+        
+        if not viz.folder then
+            viz.folder = Instance.new("Folder")
+            viz.folder.Name = "PathVisualizer"
+            viz.folder.Parent = workspace
+        end
+        
+        part.Parent = viz.folder
+        table.insert(viz.parts, part)
+        table.insert(parts, part)
     end
     
-    part.Parent = viz.folder
-    table.insert(viz.parts, part)
-    
-    return part
+    return parts
 end
 
 function module.clear(viz)
@@ -67,7 +100,7 @@ function module.drawPath(viz, path, currentIndex)
             color = viz.goalColor
         end
         
-        module.createLine(viz, startPos, endPos, color)
+        module.createSegmentedLine(viz, startPos, endPos, color, 8)
     end
     
     if #path > 0 then
