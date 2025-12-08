@@ -1,10 +1,6 @@
 local Fly = {}
 
 local Player = game.Players.LocalPlayer
-local Char = Player.Character or Player.CharacterAdded:Wait()
-local HRP = Char:WaitForChild("HumanoidRootPart")
-local Hum = Char:FindFirstChildOfClass("Humanoid")
-
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
@@ -15,10 +11,7 @@ local flying = false
 local activeTween = nil
 local flyKey = Enum.KeyCode.F
 
-local moveState = {
-	W=false, A=false, S=false, D=false,
-	Up=false, Down=false
-}
+local moveState = {W=false,A=false,S=false,D=false,Up=false,Down=false}
 
 local keyMap = {
 	[Enum.KeyCode.W] = "W",
@@ -36,48 +29,59 @@ local function stopTween()
 	end
 end
 
-local function getMoveVector()
-	local cam = workspace.CurrentCamera
+local function getMoveVector(cam, HRP)
 	local forward = cam.CFrame.LookVector
 	local right = cam.CFrame.RightVector
 	local m = Vector3.zero
-
 	if moveState.W then m += forward end
 	if moveState.S then m -= forward end
 	if moveState.A then m -= right end
 	if moveState.D then m += right end
 	if moveState.Up then m += Vector3.yAxis end
 	if moveState.Down then m -= Vector3.yAxis end
-
 	if m.Magnitude > 0 then m = m.Unit end
 	return m
 end
 
-local function noclip(state)
-	for _,v in ipairs(Char:GetDescendants()) do
+local function noclip(char, state)
+	for _,v in ipairs(char:GetDescendants()) do
 		if v:IsA("BasePart") then
 			v.CanCollide = not state
 		end
 	end
 end
 
+local HRP, Hum
+
+local function setupCharacter(char)
+	Hum = char:FindFirstChildWhichIsA("Humanoid")
+	HRP = char:WaitForChild("HumanoidRootPart")
+	if flying then
+		Hum.PlatformStand = true
+		noclip(char, true)
+	end
+end
+
+-- handle respawn
+Player.CharacterAdded:Connect(function(char)
+	setupCharacter(char)
+end)
+
 function Fly.start()
 	if flying then return end
+	if not Player.Character then return end
+
 	flying = true
-	Hum.PlatformStand = true
-	noclip(true)
+	setupCharacter(Player.Character)
 
 	RunService:BindToRenderStep("StableFly", 500, function()
-		if not flying then return end
+		if not flying or not HRP or not Hum then return end
 
 		HRP.AssemblyLinearVelocity = Vector3.zero
 		HRP.AssemblyAngularVelocity = Vector3.zero
-		HRP.CFrame = CFrame.new(
-			HRP.Position,
-			HRP.Position + workspace.CurrentCamera.CFrame.LookVector
-		)
+		HRP.CFrame = CFrame.new(HRP.Position, HRP.Position + workspace.CurrentCamera.CFrame.LookVector)
 
-		local move = getMoveVector()
+		local move = getMoveVector(workspace.CurrentCamera, HRP)
 		if move.Magnitude == 0 then stopTween() return end
 
 		local target = HRP.Position + move * SPEED
@@ -92,12 +96,11 @@ function Fly.start()
 end
 
 function Fly.stop()
-	if not flying then return end
 	flying = false
 	stopTween()
 	RunService:UnbindFromRenderStep("StableFly")
-	Hum.PlatformStand = false
-	noclip(false)
+	if Hum then Hum.PlatformStand = false end
+	if Player.Character then noclip(Player.Character, false) end
 end
 
 function Fly.setKey(key)
